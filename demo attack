@@ -1,0 +1,109 @@
+import os
+import time
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
+
+# --- 1. PHẦN SERVER (ORACLE) ---
+class PaddingOracleServerGiaLap:
+    def __init__(self):
+        self._key = os.urandom(32)  # Khóa bí mật (Kẻ tấn công không biết)
+        self._iv = os.urandom(16)   # IV ngẫu nhiên
+
+    def lay_ban_ma_muc_tieu(self):
+        # Bản rõ ban đầu
+        msg = b"hocviencongnghebuuchinhvienthong" 
+        
+        # Thêm Padding PKCS7
+        padder = padding.PKCS7(128).padder()
+        padded_data = padder.update(msg) + padder.finalize()
+        
+        # Mã hóa AES-CBC
+        cipher = Cipher(algorithms.AES(self._key), modes.CBC(self._iv))
+        encryptor = cipher.encryptor()
+        
+        # Trả về IV + Ciphertext (Đây là đống Hex kẻ tấn công bắt được)
+        return self._iv + encryptor.update(padded_data) + encryptor.finalize()
+    
+
+    def is_padding_valid(self, data):
+        # Server chỉ trả về Đúng/Sai, đây là lỗ hổng
+        iv = data[:16]
+        ct = data[16:]
+        cipher = Cipher(algorithms.AES(self._key), modes.CBC(iv))
+        decryptor = cipher.decryptor()
+        try:
+            decrypted = decryptor.update(ct) + decryptor.finalize()
+            unpadder = padding.PKCS7(128).unpadder()
+            unpadder.update(decrypted) + unpadder.finalize()
+            return True  # Padding đúng
+        except:
+            return False # Padding sai
+
+# --- 2. PHẦN KẺ TẤN CÔNG (ATTACKER) ---
+def tan_cong_oracle_structured():
+    server = PaddingOracleServerGiaLap()
+    captured_data = server.lay_ban_ma_muc_tieu()
+    
+    # BƯỚC 1: XÁC ĐỊNH MỤC TIÊU & HIỂN THỊ THÔNG TIN BAN ĐẦU
+    print("-" * 50)
+    print(f"[SERVER] Bản rõ ban đầu:hocviencongnghebuuchinhvienthong")
+    print(f"[SERVER] Bản mã (Hex):  {captured_data.hex()}")
+    print("-" * 50)
+    print("[ATTACK] Bắt đầu dò tìm không cần Key...")
+    time.sleep(1) # Visual pause
+
+    # Chia dữ liệu bắt được thành các khối 16 bytes
+    blocks = [captured_data[i:i+16] for i in range(0, len(captured_data), 16)]
+    result_plaintext = ""
+
+    # Tấn công từng khối (Bắt đầu từ khối 1 và bỏ qua khối 0 vì là IV)
+    for b_idx in range(1, len(blocks)):
+        prev_block = blocks[b_idx-1]
+        curr_block = blocks[b_idx]
+        intermediate = [0] * 16
+        decrypted_block = [0] * 16
+        
+        # STRUCTURED OUTPUT: Hiện khối đang xử lý
+        print(f"\n[>] Đang xử lý Khối {b_idx}:")
+        
+        # BƯỚC CHÍNH: Dò ngược từ byte 15 về 0
+        for i in range(15, -1, -1):
+            expected_pad = 16 - i
+            
+            # Dùng range(256) là brute-force 00->FF
+            for val in range(256):
+                fake_iv = bytearray(16)
+                # Thiết lập các byte đã tìm được phía sau khớp với padding mới
+                for k in range(i + 1, 16):
+                    fake_iv[k] = intermediate[k] ^ expected_pad
+                
+                fake_iv[i] = val
+                
+                # Gửi cho Oracle kiểm tra
+                if server.is_padding_valid(bytes(fake_iv) + curr_block):
+                    # ĐÚNG! Tìm được mảnh ghép trung gian
+                    intermediate[i] = val ^ expected_pad
+                    # True Plaintext = Intermediate ^ Ciphertext khối thật phía trước
+                    decrypted_block[i] = intermediate[i] ^ prev_block[i]
+                    
+                    # Nếu đọc được (ASCII 32-126) thì hiện, không thì hiện '.'
+                    char = chr(decrypted_block[i]) if 32 <= decrypted_block[i] <= 126 else '.'
+                    
+                    # STRUCTURED PRINT: In đúng định dạng Byte: Value | Ký tự
+                    # Sử dụng f-string và hex formatting để đẹp
+                    print(f"    - Tìm thấy Byte {i:02d}: Value={hex(val)} | Ký tự='{char}'")
+                    
+                    time.sleep(0.2) # Mô phỏng thời gian dò byte
+                    break
+                    
+        # Ghép kết quả của khối này vào chuỗi tổng (lọc ký tự padding)
+        result_plaintext += "".join([chr(b) for b in decrypted_block if b > 16])
+
+    # BƯỚC CUỐI: Hiển thị kết quả hoàn tất
+    print("\n" + "=" * 50)
+    print(f"[!] TẤN CÔNG HOÀN TẤT!")
+    print(f"[!] Bản rõ khôi phục được: {result_plaintext}")
+    print("=" * 50)
+
+if __name__ == "__main__":
+    tan_cong_oracle_structured()
